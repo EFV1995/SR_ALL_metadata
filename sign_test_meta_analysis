@@ -1,0 +1,201 @@
+###############################################################################
+# SIGN-TEST META-ANALYSIS FOR ALPHA DIVERSITY & DIFFERENTIAL TAXA
+#
+# When only effect direction is available, this analysis implements:
+#   - Unweighted sign test
+#   - Weighted sign test (N-weighted)
+#   - Visualisation of directionality for taxa
+#
+# Author: Eduard Flores Ventura
+# Date: <Date>
+###############################################################################
+
+# ============================================================================
+# LOAD PACKAGES
+# ============================================================================
+library(tidyverse)
+library(readxl)
+library(forcats)
+library(ggplot2)
+
+# ============================================================================
+# LOAD INPUT FILE
+# Replace with relative path for GitHub reproducibility
+# ============================================================================
+file_path <- "sign_test_MA_input.xlsx"
+
+alpha <- read_excel(file_path, sheet = "Alpha_diversity")
+taxa  <- read_excel(file_path, sheet = "Differential_taxa")
+
+# Ensure numeric direction
+alpha$direction <- as.numeric(alpha$direction)
+taxa$direction  <- as.numeric(taxa$direction)
+
+# ============================================================================
+# FUNCTIONS
+# ============================================================================
+
+# ---- Unweighted Sign Test ---------------------------------------------------
+sign_test_unweighted <- function(direction_vector) {
+  
+  dir <- direction_vector[direction_vector != 0]
+  n   <- length(dir)
+  
+  if (n == 0) {
+    return(tibble(
+      n_studies     = 0,
+      prop_positive = NA,
+      p_value       = NA,
+      conf_low      = NA,
+      conf_high     = NA
+    ))
+  }
+  
+  k  <- sum(dir == 1)
+  bt <- binom.test(k, n, p = 0.5)
+  
+  tibble(
+    n_studies     = n,
+    prop_positive = k / n,
+    p_value       = bt$p.value,
+    conf_low      = bt$conf.int[1],
+    conf_high     = bt$conf.int[2]
+  )
+}
+
+# ---- Weighted Sign Test (weight = total_n) ---------------------------------
+sign_test_weighted <- function(direction_vector, weights) {
+  
+  df <- tibble(dir = direction_vector, w = weights) %>%
+    filter(dir != 0)
+  
+  if (nrow(df) == 0) {
+    return(tibble(
+      w_sum           = 0,
+      w_prop_positive = NA,
+      p_value         = NA
+    ))
+  }
+  
+  # Weighted mean direction score
+  p_hat <- sum(df$w[df$dir == 1]) / sum(df$w)
+  
+  # Normal approximation under H0: p = 0.5
+  se <- sqrt(0.25 / sum(df$w))
+  z  <- (p_hat - 0.5) / se
+  p  <- 2 * pnorm(abs(z), lower.tail = FALSE)
+  
+  tibble(
+    w_sum           = sum(df$w),
+    w_prop_positive = p_hat,
+    p_value         = p
+  )
+}
+
+# ============================================================================
+# ALPHA DIVERSITY — META-ANALYSIS
+# ============================================================================
+
+# ---- Unweighted --------------------------------------------------------------
+alpha_results_unw <- alpha %>%
+  group_by(metric) %>%
+  summarise(sign_test_unweighted(direction), .groups = "drop")
+
+alpha_pooled_unw <- sign_test_unweighted(alpha$direction) %>%
+  mutate(metric = "ALL_METRICS_POOLED")
+
+alpha_results_unw <- bind_rows(alpha_results_unw, alpha_pooled_unw)
+
+# ---- Weighted ---------------------------------------------------------------
+alpha_results_w <- alpha %>%
+  group_by(metric) %>%
+  summarise(sign_test_weighted(direction, total_n), .groups = "drop")
+
+alpha_pooled_w <- sign_test_weighted(alpha$direction, alpha$total_n) %>%
+  mutate(metric = "ALL_METRICS_POOLED")
+
+alpha_results_w <- bind_rows(alpha_results_w, alpha_pooled_w)
+
+# ============================================================================
+# PLOT — ALPHA DIVERSITY (Unweighted)
+# ============================================================================
+
+p_alpha <- ggplot(alpha_results_unw,
+                  aes(x = fct_reorder(metric, prop_positive),
+                      y = prop_positive)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  geom_point(size = 4, color = "#0072B2") +
+  geom_errorbar(aes(ymin = conf_low, ymax = conf_high),
+                width = 0.12, color = "#0072B2") +
+  coord_flip() +
+  labs(
+    title = "Unweighted Sign-test Meta-analysis (Alpha Diversity)",
+    x     = "Diversity Metric",
+    y     = "Proportion of studies where ALL > control"
+  ) +
+  theme_minimal(base_size = 15)
+
+# ============================================================================
+# TAXA — META-ANALYSIS
+# ============================================================================
+
+# ---- Unweighted --------------------------------------------------------------
+taxa_results_unw <- taxa %>%
+  group_by(taxon) %>%
+  summarise(sign_test_unweighted(direction), .groups = "drop")
+
+# ---- Weighted ---------------------------------------------------------------
+taxa_results_w <- taxa %>%
+  group_by(taxon) %>%
+  summarise(sign_test_weighted(direction, total_n), .groups = "drop")
+
+# ============================================================================
+# TAXA — WEIGHTED NET DIRECTION SCORE
+# (useful for ranking enriched vs depleted taxa)
+# ============================================================================
+taxa_weighted_score <- taxa %>%
+  mutate(w = total_n) %>%
+  group_by(taxon) %>%
+  summarise(weighted_score = sum(direction * w) / sum(w))
+
+# ============================================================================
+# PLOT — TAXA DIRECTIONAL SCORE
+# ============================================================================
+
+p_taxa <- ggplot(taxa_weighted_score,
+                 aes(x = fct_reorder(taxon, weighted_score),
+                     y = weighted_score,
+                     fill = weighted_score)) +
+
+  geom_col(width = 0.7, color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+
+  scale_fill_gradient2(
+    low      = "#D55E00",     # depleted
+    mid      = "gray90",
+    high     = "#0072B2",     # enriched
+    midpoint = 0,
+    limits   = c(-1, 1),
+    name     = "Direction\nScore"
+  ) +
+  
+  coord_flip() +
+  labs(
+    title    = "Weighted Net Direction Score for Differential Taxa",
+    subtitle = "Negative = depleted in ALL; Positive = enriched in ALL",
+    x = "",
+    y = "Depleted               |               Enriched"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 20),
+    plot.subtitle   = element_text(size = 13),
+    axis.text.y     = element_text(face = "bold"),
+    panel.grid.major.y = element_blank(),
+    legend.key.height = unit(1.1, "cm")
+  )
+
+# Save figure -----------------------------------------------------------------
+ggsave("taxa_weighted_direction_score.png",
+       plot = p_taxa,
+       dpi = 300, width = 10, height = 8)
