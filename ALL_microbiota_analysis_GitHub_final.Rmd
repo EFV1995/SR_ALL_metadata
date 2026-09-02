@@ -1,0 +1,339 @@
+---
+title: "Pediatric ALL microbiota: quantitative and structured synthesis"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+params:
+  input_xlsx: "ALL_microbiota_ultimate_input.xlsx"
+  output_dir: "analysis_outputs"
+---
+
+```{r setup, include=FALSE}
+required_packages <- c(
+  "tibble",
+  "readxl", "dplyr", "tidyr", "ggplot2", "stringr",
+  "metafor", "openxlsx", "knitr"
+)
+missing_packages <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_packages) > 0) {
+  stop(
+    paste0(
+      "Install these packages before rendering: ",
+      paste(missing_packages, collapse = ", "),
+      "\nRun while online: install.packages(c(",
+      paste(sprintf('"%s"', missing_packages), collapse = ", "),
+      "))"
+    )
+  )
+}
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(metafor)
+library(openxlsx)
+library(knitr)
+
+input_xlsx <- params$input_xlsx
+output_dir <- params$output_dir
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+save_both <- function(plot, stem, width = 11, height = 7) {
+  ggsave(file.path(output_dir, paste0(stem, ".png")), plot,
+         width = width, height = height, dpi = 300, bg = "white")
+  ggsave(file.path(output_dir, paste0(stem, ".pdf")), plot,
+         width = width, height = height, device = "pdf", bg = "white")
+}
+
+read_sheet <- function(sheet) read_excel(input_xlsx, sheet = sheet)
+
+study_master <- read_sheet("Study_master")
+risk_of_bias <- read_sheet("Risk_of_bias")
+cohort_overlap <- read_sheet("Cohort_overlap")
+findings_all <- read_sheet("Findings_all")
+heatmap_input <- read_sheet("Heatmap_input")
+taxon_direction <- read_sheet("Taxon_direction")
+ma_shannon <- read_sheet("MA_Shannon")
+ma_richness <- read_sheet("MA_Richness")
+
+# Fixed interpretation used throughout.
+direction_levels <- c("Lower/depleted", "No difference", "Higher/enriched", "Different/mixed", "Not assessed")
+direction_colours <- c(
+  "Lower/depleted" = "#3B82F6",
+  "No difference" = "#D1D5DB",
+  "Higher/enriched" = "#EF4444",
+  "Different/mixed" = "#F59E0B",
+  "Not assessed" = "#FFFFFF"
+)
+```
+
+
+> **Repository version.** This file reproduces the exploratory alpha-diversity
+> meta-analyses and descriptive structured-synthesis figures used for the manuscript.
+> Obsolete inferential vote-counting/sign-test outputs and aggregate risk-of-bias
+> scores are intentionally not generated.
+
+# 1. Validation
+
+```{r validation}
+validation <- list()
+validation[["duplicate_finding_ids"]] <- findings_all %>% count(finding_id) %>% filter(n > 1)
+validation[["invalid_direction_codes"]] <- bind_rows(
+  heatmap_input %>% transmute(source = "Heatmap_input", id = paste(row_label, feature), direction_code),
+  taxon_direction %>% transmute(source = "Taxon_direction", id = taxon_id, direction_code)
+) %>% filter(!direction_code %in% c(-1, 0, 1, 2, 9))
+validation[["main_shannon_incomplete"]] <- ma_shannon %>%
+  filter(include_main) %>%
+  filter(if_any(c(n_all, mean_all, sd_all, n_control, mean_control, sd_control), is.na))
+validation[["main_richness_incomplete"]] <- ma_richness %>%
+  filter(include_main) %>%
+  filter(if_any(c(n_all, mean_all, sd_all, n_control, mean_control, sd_control), is.na))
+validation[["cohort_overlap"]] <- cohort_overlap
+
+validation_summary <- tibble(
+  check = names(validation),
+  n_rows = vapply(validation, nrow, integer(1))
+)
+kable(validation_summary)
+```
+
+# 2. Exploratory alpha-diversity meta-analyses
+
+The main analyses include three diagnosis-time studies. Negative Hedges' g indicates lower diversity or richness in ALL. The extended analyses add De Pietri as an early-induction sensitivity analysis.
+
+```{r meta-functions}
+run_smd_meta <- function(data, include_column, analysis_name, file_stem) {
+  dat <- data %>% filter(.data[[include_column]] %in% TRUE)
+  if (nrow(dat) < 2) stop(paste("Fewer than two studies for", analysis_name))
+
+  es <- metafor::escalc(
+    measure = "SMD",
+    m1i = mean_all, sd1i = sd_all, n1i = n_all,
+    m2i = mean_control, sd2i = sd_control, n2i = n_control,
+    data = dat, vtype = "UB"
+  ) %>%
+    mutate(
+      ci_low = yi - qnorm(0.975) * sqrt(vi),
+      ci_high = yi + qnorm(0.975) * sqrt(vi),
+      analysis = analysis_name
+    )
+
+  model <- metafor::rma(
+    yi = yi, vi = vi, data = es,
+    method = "REML", test = "knha",
+    slab = study_id
+  )
+  prediction <- predict(model)
+
+  summary <- tibble(
+    analysis = analysis_name,
+    k = model$k,
+    pooled_hedges_g = as.numeric(model$b),
+    ci_low = model$ci.lb,
+    ci_high = model$ci.ub,
+    p_value = model$pval,
+    tau2 = model$tau2,
+    I2 = model$I2,
+    Q = model$QE,
+    Q_p = model$QEp,
+    prediction_low = prediction$pi.lb,
+    prediction_high = prediction$pi.ub,
+    estimator = "REML",
+    inference = "Hartung-Knapp"
+  )
+
+  draw_forest <- function(device_file, device = c("png", "pdf")) {
+    device <- match.arg(device)
+    if (device == "png") {
+      png(device_file, width = 2500, height = 1800, res = 300)
+    } else {
+      pdf(device_file, width = 8.5, height = 6.5, useDingbats = FALSE)
+    }
+    par(mar = c(4, 4, 2, 2))
+    metafor::forest(
+      model,
+      xlab = "Hedges' g (negative = lower in ALL)",
+      refline = 0,
+      header = c("Study", "Hedges' g [95% CI]"),
+      cex = 0.9
+    )
+    title(analysis_name)
+    dev.off()
+  }
+
+  draw_forest(file.path(output_dir, paste0(file_stem, ".png")), "png")
+  draw_forest(file.path(output_dir, paste0(file_stem, ".pdf")), "pdf")
+
+  loo <- if (model$k >= 3) as.data.frame(metafor::leave1out(model)) %>%
+    tibble::rownames_to_column("omitted_study") else tibble()
+
+  list(data = es, model = model, summary = summary, leave_one_out = loo)
+}
+
+shannon_main <- run_smd_meta(ma_shannon, "include_main", "Shannon diversity at diagnosis", "forest_Shannon_main")
+shannon_extended <- run_smd_meta(ma_shannon, "include_extended", "Shannon diversity: extended early-induction sensitivity", "forest_Shannon_extended")
+richness_main <- run_smd_meta(ma_richness, "include_main", "Chao1 richness at diagnosis", "forest_Richness_main")
+richness_extended <- run_smd_meta(ma_richness, "include_extended", "Richness: extended sensitivity including observed species", "forest_Richness_extended")
+
+meta_summary <- bind_rows(
+  shannon_main$summary, shannon_extended$summary,
+  richness_main$summary, richness_extended$summary
+)
+kable(meta_summary, digits = 3)
+```
+
+# 3. Direction heatmaps
+
+```{r direction-heatmaps}
+heatmap_plot <- function(panel_name) {
+  d <- heatmap_input %>%
+    filter(panel == panel_name) %>%
+    mutate(
+      direction_label = factor(direction_label, levels = direction_levels),
+      row_label = factor(row_label, levels = rev(unique(row_label))),
+      feature = factor(feature, levels = unique(feature))
+    )
+
+  p <- ggplot(d, aes(x = feature, y = row_label, fill = direction_label)) +
+    geom_tile(color = "white", linewidth = 0.7) +
+    geom_text(aes(label = cell_label), size = 3.2) +
+    scale_fill_manual(values = direction_colours, drop = FALSE) +
+    labs(title = paste("Direction heatmap:", panel_name), x = NULL, y = NULL, fill = "Direction") +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      panel.grid = element_blank(),
+      axis.text.x = element_text(angle = 40, hjust = 1),
+      axis.text.y = element_text(face = "bold")
+    )
+  p
+}
+
+heatmap_panels <- unique(heatmap_input$panel)
+heatmap_plots <- lapply(heatmap_panels, heatmap_plot)
+names(heatmap_plots) <- heatmap_panels
+for (nm in names(heatmap_plots)) {
+  stem <- paste0("heatmap_", str_replace_all(str_to_lower(nm), "[^a-z0-9]+", "_"))
+  save_both(heatmap_plots[[nm]], stem, width = 12, height = 6.5)
+}
+```
+
+# 4. Taxon-direction heatmap
+
+```{r taxon-heatmap}
+taxon_plot_data <- taxon_direction %>%
+  mutate(
+    direction_label = factor(direction_label, levels = direction_levels),
+    study_context = paste(study_id, clinical_context, sep = " - "),
+    study_context = factor(study_context, levels = rev(unique(study_context))),
+    canonical_taxon_or_group = factor(canonical_taxon_or_group, levels = unique(canonical_taxon_or_group))
+  )
+
+p_taxa <- ggplot(taxon_plot_data,
+                 aes(x = canonical_taxon_or_group, y = study_context, fill = direction_label)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = ifelse(direction_code == -1, "↓", ifelse(direction_code == 1, "↑", "≠"))), size = 3) +
+  facet_wrap(~ panel, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = direction_colours, drop = FALSE) +
+  labs(title = "Direction of selected recurrent or clinically interpretable taxa",
+       subtitle = "Only transparent, curated taxa are shown; granular results remain in Findings_all",
+       x = NULL, y = NULL, fill = "Direction") +
+  theme_minimal(base_size = 10) +
+  theme(
+    legend.position = "bottom",
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 7),
+    strip.text = element_text(face = "bold")
+  )
+save_both(p_taxa, "taxon_direction_heatmap", width = 14, height = 11)
+```
+
+
+# 5. Export numerical results and audit tables
+
+This export contains the numerical meta-analysis results used in the manuscript,
+the study-level effect-size data, leave-one-out sensitivity analyses, cohort-overlap
+audit, curated descriptive-synthesis inputs, and the raw risk-of-bias table.
+
+No vote-counting p-values, weighted sign tests, pooled directional scores, funnel plots,
+publication-bias tests, or meta-regression are calculated.
+
+```{r export-results}
+results <- list(
+  Meta_summary = meta_summary,
+  Shannon_main_studies = shannon_main$data,
+  Shannon_extended_studies = shannon_extended$data,
+  Richness_main_studies = richness_main$data,
+  Richness_extended_studies = richness_extended$data,
+  Shannon_main_leave1out = shannon_main$leave_one_out,
+  Shannon_ext_leave1out = shannon_extended$leave_one_out,
+  Richness_main_leave1out = richness_main$leave_one_out,
+  Richness_ext_leave1out = richness_extended$leave_one_out,
+  Study_master = study_master,
+  Cohort_overlap = cohort_overlap,
+  Risk_of_bias = risk_of_bias,
+  Heatmap_input = heatmap_input,
+  Taxon_direction = taxon_direction,
+  Validation_summary = validation_summary
+)
+
+openxlsx::write.xlsx(
+  results,
+  file.path(output_dir, "analysis_results.xlsx"),
+  overwrite = TRUE
+)
+
+manifest <- tibble(
+  file = list.files(output_dir, full.names = FALSE),
+  generated = Sys.time()
+)
+
+write.csv(
+  manifest,
+  file.path(output_dir, "analysis_manifest.csv"),
+  row.names = FALSE
+)
+
+writeLines(
+  capture.output(sessionInfo()),
+  file.path(output_dir, "sessionInfo.txt")
+)
+```
+
+# 6. Interpretation guardrails
+
+- The meta-analyses are exploratory and should be labelled as such.
+- Primary meta-analyses are restricted to diagnosis-time, pretreatment gut Shannon diversity and Chao1 richness.
+- The primary pooled cohorts are Gao 2020, Rajagopala 2020, and Chua 2020.
+- Extended sensitivity analyses add the De Pietri early-induction cohort.
+- Negative Hedges' g values indicate lower diversity or richness in ALL.
+- Do not report publication-bias tests or funnel plots with fewer than 10 studies.
+- Do not meta-regress with three or four studies.
+- Do not pool oral and gut data.
+- Do not pool Shannon and Chao1 into a single effect.
+- Do not treat repeated timepoints, samples, taxa, or publications as independent studies.
+- Do not use participant-number-weighted vote counting or inferential sign tests as a substitute for effect-size meta-analysis.
+- Structured-synthesis heatmaps are descriptive and should not be interpreted as pooled effect estimates.
+- Apply GRADE separately to diagnosis-time Shannon diversity and diagnosis-time Chao1 richness.
+- Risk of bias should be presented using design-appropriate JBI item-level judgments rather than an aggregate numerical quality score.
+
+# 7. Reproducibility note
+
+This R Markdown file expects `ALL_microbiota_ultimate_input.xlsx` in the same directory by default.
+All paths are relative; no user-specific absolute paths, credentials, or API keys are required.
+
+Render with:
+
+```r
+rmarkdown::render("ALL_microbiota_analysis_GitHub_final.Rmd")
+```
+
+Outputs are written to `analysis_outputs/`.
+
+The manuscript-ready combined multi-panel figures may be assembled from the vector PDF outputs
+without altering the underlying numerical analyses.
