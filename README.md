@@ -1,5 +1,4 @@
-# Pediatric ALL microbiota — reproducible analysis
-
+# Pediatric ALL microbiota
 This repository contains the reproducible quantitative and structured-synthesis analysis supporting the manuscript on microbiota alterations in pediatric acute lymphoblastic leukemia (ALL).
 
 ## Files
