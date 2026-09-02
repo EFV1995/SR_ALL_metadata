@@ -305,27 +305,6 @@ writeLines(
 )
 ```
 
-# 6. Interpretation guardrails
-
-- The meta-analyses are exploratory and should be labelled as such.
-- Primary meta-analyses are restricted to diagnosis-time, pretreatment gut Shannon diversity and Chao1 richness.
-- The primary pooled cohorts are Gao 2020, Rajagopala 2020, and Chua 2020.
-- Extended sensitivity analyses add the De Pietri early-induction cohort.
-- Negative Hedges' g values indicate lower diversity or richness in ALL.
-- Do not report publication-bias tests or funnel plots with fewer than 10 studies.
-- Do not meta-regress with three or four studies.
-- Do not pool oral and gut data.
-- Do not pool Shannon and Chao1 into a single effect.
-- Do not treat repeated timepoints, samples, taxa, or publications as independent studies.
-- Do not use participant-number-weighted vote counting or inferential sign tests as a substitute for effect-size meta-analysis.
-- Structured-synthesis heatmaps are descriptive and should not be interpreted as pooled effect estimates.
-- Apply GRADE separately to diagnosis-time Shannon diversity and diagnosis-time Chao1 richness.
-- Risk of bias should be presented using design-appropriate JBI item-level judgments rather than an aggregate numerical quality score.
-
-# 7. Reproducibility note
-
-This R Markdown file expects `ALL_microbiota_ultimate_input.xlsx` in the same directory by default.
-All paths are relative; no user-specific absolute paths, credentials, or API keys are required.
 
 Render with:
 
@@ -334,6 +313,3 @@ rmarkdown::render("ALL_microbiota_analysis_GitHub_final.Rmd")
 ```
 
 Outputs are written to `analysis_outputs/`.
-
-The manuscript-ready combined multi-panel figures may be assembled from the vector PDF outputs
-without altering the underlying numerical analyses.
